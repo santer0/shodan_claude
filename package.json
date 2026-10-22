@@ -1,8 +1,10 @@
+
 {
   "name": "shodan-claude",
   "version": "1.0.0",
   "type": "module",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.1"
+    "@modelcontextprotocol/sdk": "^1.0.1",
+    "zod": "^3.25.0"
   }
 }
