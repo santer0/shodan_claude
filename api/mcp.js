@@ -1,145 +1,180 @@
-export default async function handler(req, res) {
-  // 1. Configuración estricta de CORS y Protocolo MCP requerida por Anthropic
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-mcp-protocol-version');
-  res.setHeader('x-mcp-protocol-version', '2024-11-05'); 
 
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { z } from "zod";
 
-  // 2. Respuesta ultra-simple al GET: Texto plano para romper el bucle del validador de Claude
-  if (req.method === 'GET') {
-    res.setHeader('Content-Type', 'text/plain');
-    return res.status(200).send("OK");
-  }
+function createServer() {
+  const server = new McpServer({
+    name: "shodan-claude",
+    version: "1.0.0",
+  });
 
-  // 3. Procesamiento de las peticiones POST de Claude (Aquí ocurre la magia de las herramientas)
-  if (req.method === 'POST') {
-    let body = {};
-    try {
-      body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
-    } catch (e) {
-      return res.status(400).json({ error: "JSON inválido" });
-    }
+  server.tool(
+    "shodan_search",
+    "Busca dispositivos conectados a Internet en Shodan mediante filtros como port:22, product:nginx o country:ES.",
+    {
+      query: z.string().min(1).describe("Consulta de búsqueda de Shodan"),
+      limit: z.number().int().min(1).max(20).optional()
+        .describe("Número máximo de resultados, entre 1 y 20"),
+    },
+    async ({ query, limit = 5 }) => {
+      const apiKey = process.env.SHODAN_API_KEY;
 
-    const { method, params, id } = body;
+      if (!apiKey) {
+        return {
+          isError: true,
+          content: [{
+            type: "text",
+            text: "Falta configurar SHODAN_API_KEY en Vercel.",
+          }],
+        };
+      }
 
-    // A. Claude solicita la lista de herramientas
-    if (method === "tools/list") {
-      return res.status(200).json({
-        jsonrpc: "2.0",
-        id: id || 1,
-        result: {
-          tools: [
-            {
-              name: "shodan_search",
-              description: "Busca dispositivos conectados a Internet en Shodan mediante una query de filtrado.",
-              inputSchema: {
-                type: "object",
-                properties: {
-                  query: {
-                    type: "string",
-                    description: "Filtros de búsqueda (ej: 'port:22', 'product:nginx', 'country:ES')."
-                  },
-                  limit: {
-                    type: "number",
-                    description: "Número máximo de resultados a retornar (Máx 20)."
-                  }
-                },
-                required: ["query"]
-              }
-            }
-          ]
-        }
-      });
-    }
+      try {
+        const url = new URL(
+          "https://api.shodan.io/shodan/host/search"
+        );
 
-    // B. Claude ejecuta la herramienta seleccionada
-    if (method === "tools/call") {
-      const { name, arguments: args } = params || {};
+        url.searchParams.set("key", apiKey);
+        url.searchParams.set("query", query);
+        url.searchParams.set("page", "1");
 
-      if (name === "shodan_search") {
-        const query = args?.query;
-        const requestedLimit = args?.limit;
-        const apiKey = process.env.SHODAN_API_KEY;
+        const response = await fetch(url);
+        const data = await response.json();
 
-        if (!apiKey) {
-          return res.status(200).json({
-            jsonrpc: "2.0",
-            id: id || 1,
-            result: { isError: true, content: [{ type: "text", text: "[Error] SHODAN_API_KEY no configurada en Vercel." }] }
-          });
+        if (!response.ok) {
+          return {
+            isError: true,
+            content: [{
+              type: "text",
+              text: `Shodan error (${response.status}): ${
+                data.error || response.statusText
+              }`,
+            }],
+          };
         }
 
-        if (!query) {
-          return res.status(200).json({
-            jsonrpc: "2.0",
-            id: id || 1,
-            result: { isError: true, content: [{ type: "text", text: "[Error] Falta el parámetro 'query'." }] }
-          });
-        }
-
-        const limit = requestedLimit ? Math.min(Math.max(requestedLimit, 1), 20) : 5;
-
-        try {
-          const shodanUrl = new URL('https://shodan.io');
-          shodanUrl.searchParams.append('key', apiKey);
-          shodanUrl.searchParams.append('query', query);
-          shodanUrl.searchParams.append('page', '1');
-
-          const response = await fetch(shodanUrl.toString());
-          const data = await response.json();
-
-          if (!response.ok) {
-            return res.status(200).json({
-              jsonrpc: "2.0",
-              id: id || 1,
-              result: { isError: true, content: [{ type: "text", text: `Shodan Error: ${data.error || response.statusText}` }] }
-            });
-          }
-
-          const matches = Array.isArray(data.matches) ? data.matches : [];
-          const cleanResults = matches.slice(0, limit).map(host => ({
+        const results = (data.matches || [])
+          .slice(0, limit)
+          .map((host) => ({
             ip: host.ip_str || null,
             port: host.port || null,
             isp: host.isp || null,
             org: host.org || null,
             country: host.location?.country_name || null,
             product: host.product || null,
-            vulns: Array.isArray(host.vulns) ? host.vulns.slice(0, 5) : []
+            vulns: Array.isArray(host.vulns)
+              ? host.vulns.slice(0, 5)
+              : [],
           }));
 
-          return res.status(200).json({
-            jsonrpc: "2.0",
-            id: id || 1,
-            result: {
-              content: [
-                {
-                  type: "text",
-                  text: JSON.stringify({ total: data.total || 0, results: cleanResults }, null, 2)
-                }
-              ]
-            }
-          });
-
-        } catch (error) {
-          return res.status(200).json({
-            jsonrpc: "2.0",
-            id: id || 1,
-            result: { isError: true, content: [{ type: "text", text: `Error: ${error.message}` }] }
-          });
-        }
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              total: data.total || 0,
+              results,
+            }, null, 2),
+          }],
+        };
+      } catch (error) {
+        return {
+          isError: true,
+          content: [{
+            type: "text",
+            text: `Error consultando Shodan: ${error.message}`,
+          }],
+        };
       }
     }
+  );
 
-    return res.status(200).json({
-      jsonrpc: "2.0",
-      id: id || 1,
-      error: { code: -32601, message: "Método no encontrado." }
+  return server;
+}
+
+export default async function handler(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, POST, DELETE, OPTIONS"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    [
+      "Content-Type",
+      "Accept",
+      "Authorization",
+      "Mcp-Session-Id",
+      "MCP-Protocol-Version",
+      "Last-Event-ID",
+    ].join(", ")
+  );
+  res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+
+  // Este servidor es stateless y solo necesita peticiones POST.
+  // GET no debe devolver un "OK" ficticio ni una página de login.
+  if (req.method === "GET" || req.method === "DELETE") {
+    res.setHeader("Allow", "POST, OPTIONS");
+    return res.status(405).json({
+      error: "Method not allowed",
     });
   }
 
-  return res.status(405).json({ error: "Método no permitido" });
+  if (req.method !== "POST") {
+    res.setHeader("Allow", "POST, OPTIONS");
+    return res.status(405).json({
+      error: "Method not allowed",
+    });
+  }
+
+  let body = req.body;
+
+  if (typeof body === "string") {
+    try {
+      body = JSON.parse(body);
+    } catch {
+      return res.status(400).json({
+        error: "Invalid JSON",
+      });
+    }
+  }
+
+  if (!body || typeof body !== "object") {
+    return res.status(400).json({
+      error: "Invalid JSON-RPC request",
+    });
+  }
+
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+    enableJsonResponse: true,
+  });
+
+  try {
+    const server = createServer();
+
+    await server.connect(transport);
+
+    await transport.handleRequest(req, res, body);
+  } catch (error) {
+    console.error("MCP error:", error);
+
+    if (!res.headersSent) {
+      return res.status(500).json({
+        error: "Internal MCP server error",
+      });
+    }
+  } finally {
+    // En modo stateless, se libera la conexión al terminar la petición.
+    // La respuesta ya enviada no debe modificarse.
+    try {
+      await transport.close();
+    } catch {
+      // No hay nada más que hacer si el transporte ya se cerró.
+    }
+  }
 }
