@@ -1,5 +1,5 @@
 export default async function handler(req, res) {
-  // 1. Configuración estricta de CORS y Protocolo MCP
+  // 1. Configuración estricta de CORS y Protocolo MCP requerida por Anthropic
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-mcp-protocol-version');
@@ -9,21 +9,13 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
-  // 2. Respuesta limpia al GET (Esencial para que el validador web no asuma que pides login)
+  // 2. Respuesta ultra-simple al GET: Texto plano para romper el bucle del validador de Claude
   if (req.method === 'GET') {
-    return res.status(200).json({
-      jsonrpc: "2.0",
-      result: {
-        status: "active",
-        protocol: "MCP",
-        capabilities: {
-          tools: {}
-        }
-      }
-    });
+    res.setHeader('Content-Type', 'text/plain');
+    return res.status(200).send("OK");
   }
 
-  // 3. Procesamiento de las peticiones POST de Claude
+  // 3. Procesamiento de las peticiones POST de Claude (Aquí ocurre la magia de las herramientas)
   if (req.method === 'POST') {
     let body = {};
     try {
