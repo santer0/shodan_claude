@@ -1,39 +1,40 @@
 export default async function handler(req, res) {
-  // 1. Configuración de CORS y cabeceras MCP
+  // 1. Configuración estricta de CORS y Protocolo MCP
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-mcp-protocol-version, authorization, x-api-key');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-mcp-protocol-version');
   res.setHeader('x-mcp-protocol-version', '2024-11-05'); 
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
 
-  // 2. FORZAR ERROR 401 EN GET: Esto obliga a Claude a permitir la configuración manual por cabeceras
+  // 2. Respuesta limpia al GET (Esencial para que el validador web no asuma que pides login)
   if (req.method === 'GET') {
-    return res.status(401).json({
-      status: "unauthorized",
-      message: "Se requiere autenticación mediante encabezados para conectar con este servidor MCP."
+    return res.status(200).json({
+      jsonrpc: "2.0",
+      result: {
+        status: "active",
+        protocol: "MCP",
+        capabilities: {
+          tools: {}
+        }
+      }
     });
   }
 
-  // 3. Procesamiento del Protocolo MCP (POST)
+  // 3. Procesamiento de las peticiones POST de Claude
   if (req.method === 'POST') {
     let body = {};
-    
     try {
-      if (typeof req.body === 'string') {
-        body = JSON.parse(req.body);
-      } else if (req.body) {
-        body = req.body;
-      }
+      body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
     } catch (e) {
-      return res.status(400).json({ error: "Cuerpo de petición JSON inválido" });
+      return res.status(400).json({ error: "JSON inválido" });
     }
 
     const { method, params, id } = body;
 
-    // A. Listar herramientas
+    // A. Claude solicita la lista de herramientas
     if (method === "tools/list") {
       return res.status(200).json({
         jsonrpc: "2.0",
@@ -63,7 +64,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // B. Ejecutar herramienta
+    // B. Claude ejecuta la herramienta seleccionada
     if (method === "tools/call") {
       const { name, arguments: args } = params || {};
 
@@ -84,7 +85,7 @@ export default async function handler(req, res) {
           return res.status(200).json({
             jsonrpc: "2.0",
             id: id || 1,
-            result: { isError: true, content: [{ type: "text", text: "[Error] Falta el argumento 'query'." }] }
+            result: { isError: true, content: [{ type: "text", text: "[Error] Falta el parámetro 'query'." }] }
           });
         }
 
@@ -144,7 +145,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       jsonrpc: "2.0",
       id: id || 1,
-      error: { code: -32601, message: "Método no implementado." }
+      error: { code: -32601, message: "Método no encontrado." }
     });
   }
 
